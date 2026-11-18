@@ -302,3 +302,44 @@ elif page == "Case View":
     if b4.button("💾 Save note (Open)", use_container_width=True):
         db.save_case(chosen, "Open", note)
         st.rerun()
+elif page == "Cases":
+    st.title("Cases")
+    st.caption("All analyst decisions saved in the case database.")
+
+    cases = pd.DataFrame([dict(c) for c in db.get_all_cases()])
+    if cases.empty:
+        st.info("No cases yet. Open a transaction in Case View and save a decision.")
+        st.stop()
+
+    merged = cases.merge(
+        df[["txn_id", "timestamp", "user_id", "beneficiary_id", "amount", "scenario", "risk_score", "reasons"]],
+        on="txn_id", how="left",
+    ).sort_values("updated_at", ascending=False)
+
+    statuses = ["Open", "Confirmed Fraud", "False Positive", "Escalated"]
+    for col, s in zip(st.columns(4), statuses):
+        col.metric(s, int((merged["status"] == s).sum()))
+
+    sel_status = st.multiselect("Filter by status", statuses, default=statuses)
+    view = merged[merged["status"].isin(sel_status)]
+
+    st.dataframe(
+        view[["txn_id", "status", "analyst_note", "updated_at", "user_id", "beneficiary_id",
+              "amount", "scenario", "risk_score", "reasons"]],
+        hide_index=True,
+        use_container_width=True,
+        height=420,
+        column_config={
+            "amount": st.column_config.NumberColumn("amount", format="₹%.0f"),
+            "risk_score": st.column_config.ProgressColumn("risk_score", min_value=0, max_value=100, format="%.0f"),
+            "analyst_note": st.column_config.TextColumn("analyst_note", width="large"),
+            "reasons": st.column_config.TextColumn("reasons", width="large"),
+        },
+    )
+
+    st.download_button(
+        "⬇️ Export cases as CSV",
+        data=view.to_csv(index=False).encode("utf-8"),
+        file_name="upi_sentinel_cases.csv",
+        mime="text/csv",
+    )
