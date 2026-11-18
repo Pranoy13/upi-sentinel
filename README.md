@@ -42,3 +42,61 @@ UPI Sentinel is a fraud analytics prototype that scores synthetic UPI transactio
 | Person A | Data generator, feature engineering, evaluation metrics |
 | Person B | Rules, ML model, graph analysis, final scoring |
 | Person C | Streamlit dashboard, case tracking DB, documentation, demo video |
+
+
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart LR
+    A[Synthetic data generator<br/>src/generate_data.py] --> B[Feature engineering<br/>src/features.py]
+    B --> C1[Rule engine<br/>src/rules.py]
+    B --> C2[ML models<br/>src/model.py]
+    B --> C3[Graph analysis<br/>src/graph_analysis.py]
+    C1 --> D[Final risk score + reasons<br/>src/scoring.py]
+    C2 --> D
+    C3 --> D
+    D --> E[(data/scored.csv)]
+    E --> F[Streamlit dashboard<br/>app/dashboard.py]
+    D --> G[Evaluation<br/>src/evaluate.py]
+    G --> H[(data/metrics.json)]
+    H --> F
+    F <--> I[(SQLite case DB<br/>data/cases.db)]
+```
+
+**Data flow in one line:** synthetic transactions → features → rules + ML + graph → one risk score (0-100) with reasons → dashboard → analyst decision saved to the case database.
+
+## 📁 Folder Structure
+
+```text
+upi-sentinel/
+├── app/
+│   └── dashboard.py          # Streamlit dashboard (planned)
+├── data/
+│   ├── transactions.csv      # Synthetic UPI transactions
+│   ├── features.csv          # Transactions + engineered features
+│   ├── schema.md             # Column definitions
+│   ├── scored.csv            # Risk scores + reasons (planned)
+│   ├── metrics.json          # Evaluation results (planned)
+│   └── cases.db              # Analyst case tracking, auto-created (planned)
+├── docs/
+│   ├── dataset_description.md
+│   ├── privacy_safeguards.md # (planned)
+│   └── technical_doc.md      # (planned)
+├── src/
+│   ├── generate_data.py      # Synthetic data generator
+│   ├── features.py           # Feature engineering
+│   ├── rules.py              # Rule engine with reason codes
+│   ├── model.py              # Isolation Forest + Random Forest
+│   ├── graph_analysis.py     # Mule beneficiary graph analysis
+│   ├── scoring.py            # Final risk score (planned)
+│   ├── evaluate.py           # Precision, recall, F1, FPR
+│   └── db.py                 # SQLite case tracking (planned)
+├── requirements.txt
+├── Dockerfile                # (planned)
+└── README.md
+```
+
+> Items marked *(planned)* are still being built and will be unmarked as they land.
