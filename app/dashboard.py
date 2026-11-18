@@ -343,3 +343,89 @@ elif page == "Cases":
         file_name="upi_sentinel_cases.csv",
         mime="text/csv",
     )
+
+elif page == "Evaluation":
+    import json
+
+    st.title("Evaluation")
+    st.caption("Detection performance against ground truth labels (from Person A's metrics.json).")
+
+    mpath = os.path.join(DATA, "metrics.json")
+    if not os.path.exists(mpath):
+        st.info("Metrics not generated yet. Person A will add data/metrics.json.")
+        st.stop()
+
+    with open(mpath, "r", encoding="utf-8") as f:
+        m = json.load(f)
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Precision", f"{m.get('precision', 0):.1%}")
+    k2.metric("Recall", f"{m.get('recall', 0):.1%}")
+    k3.metric("F1 score", f"{m.get('f1', 0):.1%}")
+    k4.metric("False positive rate", f"{m.get('fpr', 0):.2%}")
+    if "threshold" in m:
+        st.caption(f"Evaluated at risk threshold: {m['threshold']}")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("Confusion matrix")
+        cm = m.get("confusion_matrix")
+        if cm is None:
+            st.write("Not available.")
+        else:
+            if isinstance(cm, dict):
+                cm = [[cm.get("tn", 0), cm.get("fp", 0)], [cm.get("fn", 0), cm.get("tp", 0)]]
+            fig = px.imshow(
+                cm, text_auto=True, color_continuous_scale="Blues",
+                x=["Predicted legit", "Predicted fraud"], y=["Actual legit", "Actual fraud"],
+            )
+            fig.update_layout(**PLOT, height=380, margin=dict(t=20, b=10), coloraxis_showscale=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with c2:
+        st.subheader("Detection rate by scenario")
+        ps = m.get("per_scenario_detection") or m.get("per_scenario") or m.get("scenario_detection")
+        if not ps:
+            st.write("Not available.")
+        else:
+            if isinstance(ps, dict):
+                ps_df = pd.DataFrame({"scenario": list(ps.keys()), "rate": list(ps.values())})
+            else:
+                ps_df = pd.DataFrame(ps)
+                ps_df.columns = ["scenario", "rate"] + list(ps_df.columns[2:])
+            if ps_df["rate"].max() > 1:
+                ps_df["rate"] = ps_df["rate"] / 100
+            ps_df = ps_df.sort_values("rate")
+            fig2 = px.bar(ps_df, x="rate", y="scenario", orientation="h",
+                          color_discrete_sequence=["#4c8dff"])
+            fig2.update_layout(**PLOT, height=380, xaxis_title="Detection rate", yaxis_title="",
+                               xaxis_tickformat=".0%", xaxis_range=[0, 1], margin=dict(t=20, b=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with st.expander("Raw metrics.json"):
+        st.json(m)
+
+elif page == "About / Privacy":
+    st.title("About / Privacy")
+    st.markdown(
+        """
+**UPI Sentinel** is an explainable fraud analytics prototype built for Quick Heal Cyber Arena 2026 (PS-17).
+
+### Privacy safeguards
+- **All data is synthetic.** No real people, accounts or transactions are used.
+- **IDs are masked.** User, beneficiary and device IDs are generated tokens (for example U0267, B0605).
+- **No payment network connection.** The system never connects to UPI, banks or any real financial system.
+- **Read-only analytics.** The dashboard only reads scored data. It cannot move money or block payments.
+- **Local case storage.** Analyst decisions are stored in a local SQLite file that is not committed to the repository.
+
+### How scoring works
+Each transaction gets a risk score from 0 to 100, built from per-user baselines, rule-based reason codes,
+an anomaly and classification model, and graph analysis of mule beneficiaries. Every flag comes with
+human-readable reasons so an analyst can see why it was raised.
+
+### Limitations
+Results are based on simulated fraud patterns and will differ on real traffic. The system supports
+analysts and does not replace them.
+        """
+    )
