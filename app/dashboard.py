@@ -132,6 +132,173 @@ if page == "Overview":
         st.plotly_chart(fig2, use_container_width=True)
         st.caption("Orange bars are legitimate look-alike cases that were wrongly flagged.")
 
-else:
-    st.title(page)
-    st.info("This page is coming in the next step.")
+elif page == "High-Risk Queue":
+    st.title("High-Risk Queue")
+    st.caption("Flagged transactions, highest risk first. Pick one to open its case.")
+
+    q = df[df["flagged"]].copy()
+
+    f1, f2, f3 = st.columns(3)
+    scen_opts = sorted(q["scenario"].unique())
+    city_opts = sorted(q["city"].unique())
+    sel_scen = f1.multiselect("Scenario", scen_opts)
+    sel_city = f2.multiselect("City", city_opts)
+    min_score = f3.slider("Min risk score", 0, 100, int(threshold))
+
+    if sel_scen:
+        q = q[q["scenario"].isin(sel_scen)]
+    if sel_city:
+        q = q[q["city"].isin(sel_city)]
+    q = q[q["risk_score"] >= min_score].sort_values("risk_score", ascending=False)
+
+    case_map = {c["txn_id"]: c["status"] for c in db.get_all_cases()}
+    q["case_status"] = q["txn_id"].map(case_map).fillna("No case")
+
+    st.write(f"**{len(q):,}** transactions match.")
+
+    show = q[["txn_id", "timestamp", "user_id", "beneficiary_id", "amount", "city",
+              "scenario", "risk_score", "case_status", "reasons"]].reset_index(drop=True)
+
+    event = st.dataframe(
+        show,
+        use_container_width=True,
+        height=450,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "risk_score": st.column_config.ProgressColumn("risk_score", min_value=0, max_value=100, format="%.0f"),
+            "amount": st.column_config.NumberColumn("amount", format="₹%.0f"),
+            "reasons": st.column_config.TextColumn("reasons", width="large"),
+        },
+    )
+
+    rows = event.selection.rows
+    if rows:
+        chosen = show.iloc[rows[0]]["txn_id"]
+        st.session_state["selected_txn"] = chosen
+        st.success(f"Selected **{chosen}**. Open **Case View** in the sidebar to review it.")
+    elif "selected_txn" in st.session_state:
+        st.info(f"Currently selected: **{st.session_state['selected_txn']}**")
+
+elif page == "Case View":
+    st.title("Case View")
+    st.caption("Evidence, timeline and decision for one flagged transaction.")
+
+    flagged_ids = (
+        df[df["flagged"]].sort_values("risk_score", ascending=False)["txn_id"].tolist()
+    )
+    if not flagged_ids:
+        st.info("No flagged transactions at this threshold. Lower the risk threshold in the sidebar.")
+        st.stop()
+
+    pre = st.session_state.get("selected_txn")
+    start = flagged_ids.index(pre) if pre in flagged_ids else 0
+    chosen = st.selectbox("Transaction", flagged_ids, index=start)
+    st.session_state["selected_txn"] = chosen
+
+    row = df[df["txn_id"] == chosen].iloc[0]
+    existing = db.get_case(chosen)
+    cur_status = existing["status"] if existing else "No case yet"
+
+    # ---------- header ----------
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("Amount", f"₹{row['amount']:,.0f}")
+    h2.metric("User", row["user_id"])
+    h3.metric("Beneficiary", row["beneficiary_id"])
+    h4.metric("Case status", cur_status)
+
+    # ---------- evidence: gauge + reasons + key features ----------
+    e1, e2 = st.columns([1, 1])
+
+    with e1:
+        st.subheader("Risk score")
+        gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=float(row["risk_score"]),
+            gauge={
+                "axis": {"range": [0, 100]},
+                "bar": {"color": "#ff4b4b"},
+                "steps": [
+                    {"range": [0, 40], "color": "#1f3a2b"},
+                    {"range": [40, 70], "color": "#4a3b1a"},
+                    {"range": [70, 100], "color": "#4a1f24"},
+                ],
+                "threshold": {"line": {"color": "white", "width": 3}, "value": threshold},
+            },
+        ))
+        gauge.update_layout(**PLOT, height=260, margin=dict(t=20, b=10, l=20, r=20))
+        st.plotly_chart(gauge, use_container_width=True)
+
+        st.subheader("Why it was flagged")
+        for r in str(row["reasons"]).split(" | "):
+            st.markdown(f"- {r}")
+
+    with e2:
+        st.subheader("Key features")
+        yes_no = lambda v: "🔴 Yes" if int(v) == 1 else "🟢 No"
+        feats = pd.DataFrame({
+            "Feature": [
+                "Amount", "User's typical amount", "Amount vs typical",
+                "Txns in last 10 min", "New device", "New beneficiary",
+                "New city", "Odd hour", "Payers to this beneficiary (3h)",
+            ],
+            "Value": [
+                f"₹{row['amount']:,.0f}", f"₹{row['user_median']:,.0f}", f"{row['amount_ratio']:.1f}x",
+                str(int(row["txn_count_10m"])), yes_no(row["new_device"]), yes_no(row["new_beneficiary"]),
+                yes_no(row["new_city"]), yes_no(row["odd_hour"]), str(int(row["ben_fanin_3h"])),
+            ],
+        })
+        st.dataframe(feats, hide_index=True, use_container_width=True, height=360)
+        st.caption(f"City: {row['city']} | Channel: {row['channel']} | Device: {row['device_id']} | {row['timestamp']}")
+
+    # ---------- transaction timeline ----------
+    st.subheader("Transaction timeline (this user)")
+    u = df[df["user_id"] == row["user_id"]].sort_values("timestamp")
+    normal = u[~u["flagged"]]
+    flg = u[u["flagged"] & (u["txn_id"] != chosen)]
+    sel = u[u["txn_id"] == chosen]
+
+    tl = go.Figure()
+    tl.add_trace(go.Scatter(x=u["timestamp"], y=u["amount"], mode="lines",
+                            line=dict(color="#3a4256", width=1), hoverinfo="skip", showlegend=False))
+    tl.add_trace(go.Scatter(x=normal["timestamp"], y=normal["amount"], mode="markers", name="Normal",
+                            marker=dict(color="#4c8dff", size=8), text=normal["txn_id"]))
+    tl.add_trace(go.Scatter(x=flg["timestamp"], y=flg["amount"], mode="markers", name="Flagged",
+                            marker=dict(color="#ff4b4b", size=10), text=flg["txn_id"]))
+    tl.add_trace(go.Scatter(x=sel["timestamp"], y=sel["amount"], mode="markers", name="Selected",
+                            marker=dict(color="#ffd23f", size=18, symbol="star",
+                                        line=dict(color="white", width=1)), text=sel["txn_id"]))
+    tl.update_layout(**PLOT, height=380, xaxis_title="Time", yaxis_title="Amount (₹)",
+                     margin=dict(t=20, b=10), legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(tl, use_container_width=True)
+    st.caption(f"{len(u)} transactions by {row['user_id']}. Red = flagged, yellow star = selected.")
+
+    # ---------- related transactions ----------
+    st.subheader("Other transactions to the same beneficiary")
+    rel = df[(df["beneficiary_id"] == row["beneficiary_id"]) & (df["txn_id"] != chosen)]
+    rel = rel.sort_values("timestamp")[["txn_id", "timestamp", "user_id", "amount", "city", "risk_score"]]
+    if rel.empty:
+        st.write("None. This beneficiary only received this one transaction.")
+    else:
+        st.write(f"**{len(rel)}** other transactions, from **{rel['user_id'].nunique()}** different payers.")
+        st.dataframe(rel.tail(15), hide_index=True, use_container_width=True)
+
+    # ---------- analyst decision ----------
+    st.subheader("Analyst decision")
+    note = st.text_area("Analyst note", value=existing["analyst_note"] if existing else "",
+                        key=f"note_{chosen}", placeholder="Why are you making this call?")
+
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button("🚨 Confirm Fraud", use_container_width=True):
+        db.save_case(chosen, "Confirmed Fraud", note)
+        st.rerun()
+    if b2.button("✅ False Positive", use_container_width=True):
+        db.save_case(chosen, "False Positive", note)
+        st.rerun()
+    if b3.button("⬆️ Escalate", use_container_width=True):
+        db.save_case(chosen, "Escalated", note)
+        st.rerun()
+    if b4.button("💾 Save note (Open)", use_container_width=True):
+        db.save_case(chosen, "Open", note)
+        st.rerun()
