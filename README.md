@@ -100,3 +100,68 @@ upi-sentinel/
 ```
 
 > Items marked *(planned)* are still being built and will be unmarked as they land.
+
+
+
+---
+
+## ⚙️ Setup
+
+**Requirements:** Python 3.10+ (developed on 3.13), Git.
+
+```powershell
+# 1. Clone
+git clone https://github.com/Pranoy13/upi-sentinel.git
+cd upi-sentinel
+
+# 2. Create and activate a virtual environment (Windows PowerShell)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+# 3. Install dependencies
+pip install -r requirements.txt
+```
+
+<details>
+<summary>macOS / Linux</summary>
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+</details>
+
+> If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then try again.
+
+## ▶️ Run
+
+The repository already ships with a generated synthetic dataset, so you can launch the dashboard straight away.
+
+**Launch the dashboard (one command):**
+
+```powershell
+streamlit run app/dashboard.py
+```
+
+It opens at `http://localhost:8501`. If `data/scored.csv` is missing, the dashboard falls back to `data/features.csv` with a clearly labelled **demo scoring** banner.
+
+**Regenerate the full pipeline (optional):**
+
+```powershell
+python -m src.generate_data     # synthetic transactions -> data/transactions.csv
+python -m src.features          # engineered features   -> data/features.csv
+python -m src.evaluate          # metrics               -> data/metrics.json
+```
+
+## 🧭 Dashboard Pages
+
+| Page | What it shows |
+|------|---------------|
+| Overview | KPIs, risk threshold slider, risk score histogram, flagged count by scenario |
+| High-Risk Queue | Flagged transactions with reasons and filters |
+| Case View | Risk gauge, reasons, key features, user transaction timeline, related transactions, analyst actions |
+| Cases | All analyst decisions with CSV export |
+| Evaluation | Precision, recall, F1, false positive rate, confusion matrix, per-scenario detection |
+| About / Privacy | Synthetic data and privacy safeguards |
