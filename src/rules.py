@@ -11,35 +11,20 @@ def _result(points, reasons, index):
 
 
 def high_amount_vs_baseline(df):
-    """Detect transactions unusually large for the user's normal behaviour."""
+    """Detect unusually large transactions using stronger thresholds."""
     ratio = df["amount_ratio"].fillna(0)
     z_score = df["amount_z"].fillna(0)
 
     points = np.select(
         [
+            (ratio >= 20) | (z_score >= 8),
+            (ratio >= 12) | (z_score >= 6),
             (ratio >= 10) | (z_score >= 5),
-            (ratio >= 5) | (z_score >= 3),
-            (ratio >= 3) | (z_score >= 2),
         ],
         [25, 18, 10],
         default=0,
     )
 
-    reasons = np.select(
-        [
-            points == 25,
-            points == 18,
-            points == 10,
-        ],
-        [
-            "Amount is {:.1f}x this user's typical amount".format(0) ,
-            "Amount is unusually high compared with user baseline",
-            "Amount is moderately above user baseline",
-        ],
-        default="",
-    )
-
-    # Include actual transaction ratio in the explanation.
     reasons = np.where(
         points > 0,
         [
@@ -64,8 +49,10 @@ def velocity_burst(df):
 
     reasons = np.where(
         points > 0,
-        [f"{int(c)} transactions made by this user in the last 10 minutes"
-         for c in count],
+        [
+            f"{int(c)} transactions made by this user in the last 10 minutes"
+            for c in count
+        ],
         "",
     )
 
@@ -121,7 +108,6 @@ def odd_hour(df):
     odd = df["odd_hour"].fillna(0).astype(bool)
     night_share = df["user_night_share"].fillna(0)
 
-    # Reduce risk when the user regularly transacts at night.
     points = np.where(
         odd & (night_share < 0.10),
         8,

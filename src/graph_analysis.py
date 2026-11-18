@@ -31,21 +31,29 @@ def compute_graph_scores(df):
         )
 
     if df.empty:
-        return pd.Series(0.0, index=df.index, name="graph_score")
+        return pd.Series(
+            0.0,
+            index=df.index,
+            name="graph_score"
+        )
 
     data = df.copy()
 
+    # Preserve original row positions.
     data["original_position"] = np.arange(len(data))
 
+    # Convert timestamps.
     data["timestamp"] = pd.to_datetime(
-        data["timestamp"], errors="coerce"
+        data["timestamp"],
+        errors="coerce"
     )
 
     if data["timestamp"].isna().any():
         raise ValueError("Invalid timestamps found in graph data.")
 
+    # Process transactions chronologically.
     data = data.sort_values(
-        ["timestamp", "_original_index"]
+        ["timestamp", "original_position"]
     )
 
     # Directed graph: sender -> beneficiary.
@@ -54,8 +62,11 @@ def compute_graph_scores(df):
     # Rolling three-hour transaction history per beneficiary.
     windows = defaultdict(deque)
 
-    # Store the number of distinct senders in each rolling window.
+    # Store scores in original transaction order.
     scores = np.zeros(len(data), dtype=float)
+
+    # Maintain historical incoming degrees.
+    incoming_degrees = []
 
     window_duration = pd.Timedelta(hours=3)
 
@@ -69,38 +80,34 @@ def compute_graph_scores(df):
         if pd.isna(user) or pd.isna(beneficiary):
             continue
 
+        # Get this beneficiary's rolling history.
         window = windows[beneficiary]
 
-        # Remove transactions older than three hours.
         cutoff = timestamp - window_duration
 
+        # Remove transactions older than three hours.
         while window and window[0][0] < cutoff:
             window.popleft()
 
-        # Count distinct senders in the current rolling window.
+        # Add current sender to rolling history.
         window.append((timestamp, user))
 
+        # Count distinct senders in the rolling window.
         distinct_senders = len({
             sender for _, sender in window
         })
 
-        # Historical graph degree BEFORE adding this transaction.
+        # Historical incoming degree before current transaction.
         historical_degree = (
             graph.in_degree(beneficiary)
             if graph.has_node(beneficiary)
             else 0
         )
 
-        # Typical historical incoming degree.
-        existing_degrees = [
-            degree
-            for _, degree in graph.in_degree()
-            if degree > 0
-        ]
-
+        # Calculate typical historical incoming degree.
         typical_degree = (
-            float(np.median(existing_degrees))
-            if existing_degrees
+            float(np.median(incoming_degrees))
+            if incoming_degrees
             else 1.0
         )
 
@@ -110,13 +117,16 @@ def compute_graph_scores(df):
             1.0
         )
 
-        # Historical degree compared with typical beneficiaries.
+        # Compare beneficiary degree with typical degree.
         degree_ratio = (
             (historical_degree + 1) /
             (typical_degree * 3 + 1)
         )
 
-        degree_component = min(degree_ratio, 1.0)
+        degree_component = min(
+            degree_ratio,
+            1.0
+        )
 
         # Combined graph suspicion score.
         score = (
@@ -124,10 +134,21 @@ def compute_graph_scores(df):
             0.25 * degree_component
         )
 
-        scores[position] = min(max(score, 0.0), 1.0)
+        scores[position] = min(
+            max(score, 0.0),
+            1.0
+        )
 
         # Add current transaction to historical graph.
+        previous_degree = historical_degree
+
         graph.add_edge(user, beneficiary)
+
+        updated_degree = graph.in_degree(beneficiary)
+
+        # Update degree history only when a new sender adds an edge.
+        if updated_degree > previous_degree:
+            incoming_degrees.append(updated_degree)
 
     return pd.Series(
         scores,
