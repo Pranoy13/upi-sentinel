@@ -90,10 +90,48 @@ if DEMO:
 
 df["flagged"] = df["risk_score"] >= threshold
 
-# ---------- pages (filled in next steps) ----------
+# ---------- helpers ----------
+PLOT = dict(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+
+
+# ---------- pages ----------
 if page == "Overview":
     st.title("Overview")
-    st.write(f"Loaded {len(df):,} transactions.")
+    st.caption("Risk summary of synthetic UPI transactions at the chosen threshold.")
+
+    flagged = df[df["flagged"]]
+    open_cases = sum(1 for c in db.get_all_cases() if c["status"] == "Open")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total transactions", f"{len(df):,}")
+    k2.metric(f"Flagged (score ≥ {threshold})", f"{len(flagged):,}", f"{len(flagged) / len(df):.1%} of all")
+    k3.metric("Flagged amount", f"₹{flagged['amount'].sum():,.0f}")
+    k4.metric("Open cases", f"{open_cases}")
+
+    st.markdown("")
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("Risk score distribution")
+        fig = px.histogram(df, x="risk_score", nbins=40, color_discrete_sequence=["#4c8dff"])
+        fig.add_vline(x=threshold, line_dash="dash", line_color="#ff4b4b",
+                      annotation_text=f"threshold {threshold}", annotation_position="top")
+        fig.update_layout(**PLOT, height=380, xaxis_title="Risk score", yaxis_title="Transactions",
+                          yaxis_type="log", margin=dict(t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Log scale: most transactions are low risk, the right tail is where fraud lives.")
+
+    with c2:
+        st.subheader("Flagged transactions by scenario")
+        by_sc = flagged.groupby("scenario").size().reset_index(name="flagged").sort_values("flagged")
+        by_sc["type"] = np.where(by_sc["scenario"].str.startswith("LEGIT"), "Legitimate (false positive)", "Fraud / other")
+        fig2 = px.bar(by_sc, x="flagged", y="scenario", orientation="h", color="type",
+                      color_discrete_map={"Legitimate (false positive)": "#f5a524", "Fraud / other": "#ff4b4b"})
+        fig2.update_layout(**PLOT, height=380, xaxis_title="Flagged transactions", yaxis_title="",
+                           margin=dict(t=30, b=10), legend_title_text="")
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption("Orange bars are legitimate look-alike cases that were wrongly flagged.")
+
 else:
     st.title(page)
     st.info("This page is coming in the next step.")
