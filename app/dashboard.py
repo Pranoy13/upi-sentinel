@@ -1,4 +1,5 @@
-"""UPI Sentinel - Streamlit risk dashboard."""
+"""UPI Sentinel - Streamlit risk dashboard (synthetic data only)."""
+import json
 import os
 import sys
 
@@ -16,7 +17,6 @@ DATA = os.path.join(ROOT, "data")
 
 st.set_page_config(page_title="UPI Sentinel", page_icon="🛡️", layout="wide")
 
-# ---------- dark, clean styling ----------
 st.markdown(
     """
     <style>
@@ -31,17 +31,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+PLOT = dict(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+FEATURE_SHOW = ["amount_ratio", "user_median", "new_device", "new_beneficiary", "new_city",
+                "txn_count_10m", "amount_sum_1h", "near_limit_count_1h", "ben_fanin_3h", "odd_hour"]
+
 
 # ---------- data loading ----------
 @st.cache_data
 def load_data():
+    feats = pd.read_csv(os.path.join(DATA, "features.csv"), parse_dates=["timestamp"])
     scored_path = os.path.join(DATA, "scored.csv")
-    demo = False
     if os.path.exists(scored_path):
         df = pd.read_csv(scored_path, parse_dates=["timestamp"])
+        extra = [c for c in feats.columns if c not in df.columns]
+        if extra:
+            df = df.merge(feats[["txn_id"] + extra], on="txn_id", how="left")
+        demo = False
     else:
         demo = True
-        df = pd.read_csv(os.path.join(DATA, "features.csv"), parse_dates=["timestamp"])
+        df = feats.copy()
         s = (
             np.clip(df["amount_ratio"] - 1, 0, 8) * 6
             + np.clip(df["txn_count_10m"] - 1, 0, 6) * 8
@@ -69,8 +77,18 @@ def load_data():
             return " | ".join(out) if out else "No strong risk signals"
 
         df["reasons"] = df.apply(make_reasons, axis=1)
+    df["reasons"] = df["reasons"].fillna("No strong risk signals")
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df, demo
+
+
+@st.cache_data
+def load_metrics():
+    path = os.path.join(DATA, "metrics.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 df, DEMO = load_data()
@@ -90,11 +108,10 @@ if DEMO:
 
 df["flagged"] = df["risk_score"] >= threshold
 
-# ---------- helpers ----------
-PLOT = dict(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
 
-
-# ---------- pages ----------
+# =====================================================================
+# OVERVIEW
+# =====================================================================
 if page == "Overview":
     st.title("Overview")
     st.caption("Risk summary of synthetic UPI transactions at the chosen threshold.")
@@ -118,20 +135,25 @@ if page == "Overview":
                       annotation_text=f"threshold {threshold}", annotation_position="top")
         fig.update_layout(**PLOT, height=380, xaxis_title="Risk score", yaxis_title="Transactions",
                           yaxis_type="log", margin=dict(t=30, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         st.caption("Log scale: most transactions are low risk, the right tail is where fraud lives.")
 
     with c2:
         st.subheader("Flagged transactions by scenario")
         by_sc = flagged.groupby("scenario").size().reset_index(name="flagged").sort_values("flagged")
-        by_sc["type"] = np.where(by_sc["scenario"].str.startswith("LEGIT"), "Legitimate (false positive)", "Fraud / other")
+        by_sc["type"] = np.where(by_sc["scenario"].str.startswith("LEGIT"),
+                                 "Legitimate (false positive)", "Fraud / other")
         fig2 = px.bar(by_sc, x="flagged", y="scenario", orientation="h", color="type",
                       color_discrete_map={"Legitimate (false positive)": "#f5a524", "Fraud / other": "#ff4b4b"})
         fig2.update_layout(**PLOT, height=380, xaxis_title="Flagged transactions", yaxis_title="",
                            margin=dict(t=30, b=10), legend_title_text="")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
         st.caption("Orange bars are legitimate look-alike cases that were wrongly flagged.")
 
+
+# =====================================================================
+# HIGH-RISK QUEUE
+# =====================================================================
 elif page == "High-Risk Queue":
     st.title("High-Risk Queue")
     st.caption("Flagged transactions, highest risk first. Pick one to open its case.")
@@ -139,10 +161,8 @@ elif page == "High-Risk Queue":
     q = df[df["flagged"]].copy()
 
     f1, f2, f3 = st.columns(3)
-    scen_opts = sorted(q["scenario"].unique())
-    city_opts = sorted(q["city"].unique())
-    sel_scen = f1.multiselect("Scenario", scen_opts)
-    sel_city = f2.multiselect("City", city_opts)
+    sel_scen = f1.multiselect("Scenario", sorted(q["scenario"].unique()))
+    sel_city = f2.multiselect("City", sorted(q["city"].unique()))
     min_score = f3.slider("Min risk score", 0, 100, int(threshold))
 
     if sel_scen:
@@ -161,7 +181,7 @@ elif page == "High-Risk Queue":
 
     event = st.dataframe(
         show,
-        use_container_width=True,
+        width="stretch",
         height=450,
         hide_index=True,
         on_select="rerun",
@@ -181,251 +201,281 @@ elif page == "High-Risk Queue":
     elif "selected_txn" in st.session_state:
         st.info(f"Currently selected: **{st.session_state['selected_txn']}**")
 
+
+# =====================================================================
+# CASE VIEW
+# =====================================================================
 elif page == "Case View":
     st.title("Case View")
-    st.caption("Evidence, timeline and decision for one flagged transaction.")
 
-    flagged_ids = (
-        df[df["flagged"]].sort_values("risk_score", ascending=False)["txn_id"].tolist()
-    )
-    if not flagged_ids:
+    ranked = df[df["flagged"]].sort_values("risk_score", ascending=False)["txn_id"].tolist()
+    current = st.session_state.get("selected_txn")
+    options = ranked[:]
+    if current and current not in options:
+        options.insert(0, current)
+
+    if not options:
         st.info("No flagged transactions at this threshold. Lower the risk threshold in the sidebar.")
         st.stop()
 
-    pre = st.session_state.get("selected_txn")
-    start = flagged_ids.index(pre) if pre in flagged_ids else 0
-    chosen = st.selectbox("Transaction", flagged_ids, index=start)
-    st.session_state["selected_txn"] = chosen
+    idx = options.index(current) if current in options else 0
+    txn_id = st.selectbox("Transaction", options, index=idx)
+    st.session_state["selected_txn"] = txn_id
 
-    row = df[df["txn_id"] == chosen].iloc[0]
-    existing = db.get_case(chosen)
-    cur_status = existing["status"] if existing else "No case yet"
+    row = df[df["txn_id"] == txn_id].iloc[0]
+    existing = db.get_case(txn_id)
 
-    # ---------- header ----------
-    h1, h2, h3, h4 = st.columns(4)
-    h1.metric("Amount", f"₹{row['amount']:,.0f}")
-    h2.metric("User", row["user_id"])
-    h3.metric("Beneficiary", row["beneficiary_id"])
-    h4.metric("Case status", cur_status)
+    st.caption(
+        f"{row['txn_id']} · {row['user_id']} → {row['beneficiary_id']} · "
+        f"₹{row['amount']:,.0f} · {row['timestamp']:%d %b %Y, %H:%M} · {row['city']} · {row['channel']}"
+    )
 
-    # ---------- evidence: gauge + reasons + key features ----------
-    e1, e2 = st.columns([1, 1])
+    left, right = st.columns([1, 1.4])
 
-    with e1:
+    # ----- evidence panel -----
+    with left:
         st.subheader("Risk score")
+        score = float(row["risk_score"])
         gauge = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=float(row["risk_score"]),
+            mode="gauge+number", value=score,
             gauge={
                 "axis": {"range": [0, 100]},
-                "bar": {"color": "#ff4b4b"},
+                "bar": {"color": "#ff4b4b" if score >= threshold else "#4c8dff"},
                 "steps": [
                     {"range": [0, 40], "color": "#1f3a2b"},
-                    {"range": [40, 70], "color": "#4a3b1a"},
+                    {"range": [40, 70], "color": "#4a3d1c"},
                     {"range": [70, 100], "color": "#4a1f24"},
                 ],
                 "threshold": {"line": {"color": "white", "width": 3}, "value": threshold},
             },
         ))
-        gauge.update_layout(**PLOT, height=260, margin=dict(t=20, b=10, l=20, r=20))
-        st.plotly_chart(gauge, use_container_width=True)
+        gauge.update_layout(**PLOT, height=250, margin=dict(t=30, b=0, l=20, r=20))
+        st.plotly_chart(gauge, width="stretch")
 
         st.subheader("Why it was flagged")
         for r in str(row["reasons"]).split(" | "):
             st.markdown(f"- {r}")
 
-    with e2:
-        st.subheader("Key features")
-        yes_no = lambda v: "🔴 Yes" if int(v) == 1 else "🟢 No"
-        feats = pd.DataFrame({
-            "Feature": [
-                "Amount", "User's typical amount", "Amount vs typical",
-                "Txns in last 10 min", "New device", "New beneficiary",
-                "New city", "Odd hour", "Payers to this beneficiary (3h)",
-            ],
-            "Value": [
-                f"₹{row['amount']:,.0f}", f"₹{row['user_median']:,.0f}", f"{row['amount_ratio']:.1f}x",
-                str(int(row["txn_count_10m"])), yes_no(row["new_device"]), yes_no(row["new_beneficiary"]),
-                yes_no(row["new_city"]), yes_no(row["odd_hour"]), str(int(row["ben_fanin_3h"])),
-            ],
-        })
-        st.dataframe(feats, hide_index=True, use_container_width=True, height=360)
-        st.caption(f"City: {row['city']} | Channel: {row['channel']} | Device: {row['device_id']} | {row['timestamp']}")
+        sub = {k: row[k] for k in ["rule_score", "model_prob", "graph_score"] if k in row.index}
+        if sub:
+            s1, s2, s3 = st.columns(3)
+            cols = [s1, s2, s3]
+            for c, (k, v) in zip(cols, sub.items()):
+                c.metric(k.replace("_", " "), f"{float(v):.2f}")
 
-    # ---------- transaction timeline ----------
-    st.subheader("Transaction timeline (this user)")
-    u = df[df["user_id"] == row["user_id"]].sort_values("timestamp")
-    normal = u[~u["flagged"]]
-    flg = u[u["flagged"] & (u["txn_id"] != chosen)]
-    sel = u[u["txn_id"] == chosen]
+    with right:
+        st.subheader("Key evidence")
+        e1, e2, e3 = st.columns(3)
+        if "user_median" in row.index and pd.notna(row["user_median"]):
+            e1.metric("Amount", f"₹{row['amount']:,.0f}", f"typical ₹{row['user_median']:,.0f}", delta_color="off")
+        else:
+            e1.metric("Amount", f"₹{row['amount']:,.0f}")
+        if "amount_ratio" in row.index and pd.notna(row["amount_ratio"]):
+            e2.metric("Amount vs typical", f"{row['amount_ratio']:.1f}x")
+        if "txn_count_10m" in row.index and pd.notna(row["txn_count_10m"]):
+            e3.metric("Txns in 10 min", f"{int(row['txn_count_10m'])}")
 
-    tl = go.Figure()
-    tl.add_trace(go.Scatter(x=u["timestamp"], y=u["amount"], mode="lines",
-                            line=dict(color="#3a4256", width=1), hoverinfo="skip", showlegend=False))
-    tl.add_trace(go.Scatter(x=normal["timestamp"], y=normal["amount"], mode="markers", name="Normal",
-                            marker=dict(color="#4c8dff", size=8), text=normal["txn_id"]))
-    tl.add_trace(go.Scatter(x=flg["timestamp"], y=flg["amount"], mode="markers", name="Flagged",
-                            marker=dict(color="#ff4b4b", size=10), text=flg["txn_id"]))
-    tl.add_trace(go.Scatter(x=sel["timestamp"], y=sel["amount"], mode="markers", name="Selected",
-                            marker=dict(color="#ffd23f", size=18, symbol="star",
-                                        line=dict(color="white", width=1)), text=sel["txn_id"]))
-    tl.update_layout(**PLOT, height=380, xaxis_title="Time", yaxis_title="Amount (₹)",
-                     margin=dict(t=20, b=10), legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(tl, use_container_width=True)
-    st.caption(f"{len(u)} transactions by {row['user_id']}. Red = flagged, yellow star = selected.")
+        def yn(col):
+            if col in row.index and pd.notna(row[col]):
+                return "🔴 Yes" if int(row[col]) == 1 else "🟢 No"
+            return "n/a"
 
-    # ---------- related transactions ----------
+        e4, e5, e6 = st.columns(3)
+        e4.metric("New device", yn("new_device"))
+        e5.metric("New beneficiary", yn("new_beneficiary"))
+        e6.metric("New city", yn("new_city"))
+        e7, e8, e9 = st.columns(3)
+        e7.metric("Odd hour", yn("odd_hour"))
+        if "ben_fanin_3h" in row.index and pd.notna(row["ben_fanin_3h"]):
+            e8.metric("Payers to beneficiary (3h)", f"{int(row['ben_fanin_3h'])}")
+        if "near_limit_count_1h" in row.index and pd.notna(row["near_limit_count_1h"]):
+            e9.metric("Near-limit txns (1h)", f"{int(row['near_limit_count_1h'])}")
+
+    # ----- timeline -----
+    st.subheader("Transaction timeline")
+    ut = df[df["user_id"] == row["user_id"]].sort_values("timestamp")
+    fig_t = go.Figure()
+    fig_t.add_trace(go.Scatter(x=ut["timestamp"], y=ut["amount"], mode="lines", name="User activity",
+                               line=dict(color="#4c8dff", width=1), hoverinfo="skip"))
+    normal = ut[~ut["flagged"]]
+    fig_t.add_trace(go.Scatter(x=normal["timestamp"], y=normal["amount"], mode="markers", name="Normal",
+                               marker=dict(color="#4c8dff", size=8),
+                               customdata=normal[["txn_id", "risk_score"]],
+                               hovertemplate="%{customdata[0]}<br>₹%{y:,.0f}<br>score %{customdata[1]}<extra></extra>"))
+    fl = ut[ut["flagged"]]
+    fig_t.add_trace(go.Scatter(x=fl["timestamp"], y=fl["amount"], mode="markers", name="Flagged",
+                               marker=dict(color="#ff4b4b", size=11),
+                               customdata=fl[["txn_id", "risk_score"]],
+                               hovertemplate="%{customdata[0]}<br>₹%{y:,.0f}<br>score %{customdata[1]}<extra></extra>"))
+    fig_t.add_trace(go.Scatter(x=[row["timestamp"]], y=[row["amount"]], mode="markers", name="Selected",
+                               marker=dict(color="#ffd400", size=20, symbol="star",
+                                           line=dict(color="white", width=1)),
+                               hoverinfo="skip"))
+    fig_t.update_layout(**PLOT, height=380, xaxis_title="Time", yaxis_title="Amount (₹)",
+                        margin=dict(t=20, b=10))
+    st.plotly_chart(fig_t, width="stretch")
+    st.caption(f"{len(ut)} transactions for {row['user_id']}. Red = flagged, yellow star = selected.")
+
+    # ----- related transactions -----
     st.subheader("Other transactions to the same beneficiary")
-    rel = df[(df["beneficiary_id"] == row["beneficiary_id"]) & (df["txn_id"] != chosen)]
-    rel = rel.sort_values("timestamp")[["txn_id", "timestamp", "user_id", "amount", "city", "risk_score"]]
+    rel = df[(df["beneficiary_id"] == row["beneficiary_id"]) & (df["txn_id"] != txn_id)]
+    rel = rel.sort_values("timestamp")
     if rel.empty:
-        st.write("None. This beneficiary only received this one transaction.")
+        st.write("No other transactions to this beneficiary.")
     else:
-        st.write(f"**{len(rel)}** other transactions, from **{rel['user_id'].nunique()}** different payers.")
-        st.dataframe(rel.tail(15), hide_index=True, use_container_width=True)
+        st.write(f"{len(rel)} other transaction(s), from {rel['user_id'].nunique()} different payer(s).")
+        st.dataframe(
+            rel[["txn_id", "timestamp", "user_id", "amount", "city", "scenario", "risk_score"]].head(50),
+            width="stretch", hide_index=True, height=250,
+        )
 
-    # ---------- analyst decision ----------
+    # ----- analyst actions -----
     st.subheader("Analyst decision")
-    note = st.text_area("Analyst note", value=existing["analyst_note"] if existing else "",
-                        key=f"note_{chosen}", placeholder="Why are you making this call?")
+    if existing:
+        st.info(f"Current status: **{existing['status']}** (updated {existing['updated_at']})")
+    note = st.text_area("Analyst note", value=(existing["analyst_note"] if existing else ""),
+                        key=f"note_{txn_id}", placeholder="Why are you making this decision?")
+    b1, b2, b3 = st.columns(3)
+    if b1.button("🚨 Confirm Fraud", width="stretch"):
+        db.save_case(txn_id, "Confirmed Fraud", note)
+        st.success("Saved: Confirmed Fraud")
+        st.rerun()
+    if b2.button("✅ False Positive", width="stretch"):
+        db.save_case(txn_id, "False Positive", note)
+        st.success("Saved: False Positive")
+        st.rerun()
+    if b3.button("⬆️ Escalate", width="stretch"):
+        db.save_case(txn_id, "Escalated", note)
+        st.success("Saved: Escalated")
+        st.rerun()
+    if not existing:
+        if st.button("Open case (no decision yet)"):
+            db.save_case(txn_id, "Open", note)
+            st.rerun()
 
-    b1, b2, b3, b4 = st.columns(4)
-    if b1.button("🚨 Confirm Fraud", use_container_width=True):
-        db.save_case(chosen, "Confirmed Fraud", note)
-        st.rerun()
-    if b2.button("✅ False Positive", use_container_width=True):
-        db.save_case(chosen, "False Positive", note)
-        st.rerun()
-    if b3.button("⬆️ Escalate", use_container_width=True):
-        db.save_case(chosen, "Escalated", note)
-        st.rerun()
-    if b4.button("💾 Save note (Open)", use_container_width=True):
-        db.save_case(chosen, "Open", note)
-        st.rerun()
+
+# =====================================================================
+# CASES
+# =====================================================================
 elif page == "Cases":
     st.title("Cases")
-    st.caption("All analyst decisions saved in the case database.")
+    st.caption("All analyst decisions saved in the local case database.")
 
-    cases = pd.DataFrame([dict(c) for c in db.get_all_cases()])
-    if cases.empty:
+    cases = db.get_all_cases()
+    if not cases:
         st.info("No cases yet. Open a transaction in Case View and save a decision.")
-        st.stop()
+    else:
+        cdf = pd.DataFrame(cases)
+        info = df[["txn_id", "user_id", "amount", "scenario", "risk_score"]]
+        cdf = cdf.merge(info, on="txn_id", how="left")
 
-    merged = cases.merge(
-        df[["txn_id", "timestamp", "user_id", "beneficiary_id", "amount", "scenario", "risk_score", "reasons"]],
-        on="txn_id", how="left",
-    ).sort_values("updated_at", ascending=False)
+        statuses = ["Open", "Confirmed Fraud", "False Positive", "Escalated"]
+        sel = st.multiselect("Filter by status", statuses, default=statuses)
+        cdf = cdf[cdf["status"].isin(sel)]
 
-    statuses = ["Open", "Confirmed Fraud", "False Positive", "Escalated"]
-    for col, s in zip(st.columns(4), statuses):
-        col.metric(s, int((merged["status"] == s).sum()))
+        m1, m2, m3, m4 = st.columns(4)
+        for col, s in zip([m1, m2, m3, m4], statuses):
+            col.metric(s, int((pd.DataFrame(cases)["status"] == s).sum()))
 
-    sel_status = st.multiselect("Filter by status", statuses, default=statuses)
-    view = merged[merged["status"].isin(sel_status)]
+        st.dataframe(cdf, width="stretch", hide_index=True)
+        st.download_button("⬇️ Export cases (CSV)", cdf.to_csv(index=False).encode("utf-8"),
+                           file_name="upi_sentinel_cases.csv", mime="text/csv")
 
-    st.dataframe(
-        view[["txn_id", "status", "analyst_note", "updated_at", "user_id", "beneficiary_id",
-              "amount", "scenario", "risk_score", "reasons"]],
-        hide_index=True,
-        use_container_width=True,
-        height=420,
-        column_config={
-            "amount": st.column_config.NumberColumn("amount", format="₹%.0f"),
-            "risk_score": st.column_config.ProgressColumn("risk_score", min_value=0, max_value=100, format="%.0f"),
-            "analyst_note": st.column_config.TextColumn("analyst_note", width="large"),
-            "reasons": st.column_config.TextColumn("reasons", width="large"),
-        },
-    )
 
-    st.download_button(
-        "⬇️ Export cases as CSV",
-        data=view.to_csv(index=False).encode("utf-8"),
-        file_name="upi_sentinel_cases.csv",
-        mime="text/csv",
-    )
-
+# =====================================================================
+# EVALUATION
+# =====================================================================
 elif page == "Evaluation":
-    import json
-
     st.title("Evaluation")
-    st.caption("Detection performance against ground truth labels (from Person A's metrics.json).")
+    m = load_metrics()
+    if not m:
+        st.info("Metrics not generated yet. Waiting for data/metrics.json.")
+    else:
+        st.caption(
+            f"Time-based hold-out: {m.get('test_rows', '?'):,} test transactions, "
+            f"{m.get('test_fraud', '?')} fraud · evaluated at threshold {m.get('threshold', '?')}."
+        )
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Precision", f"{m.get('precision', 0):.1%}")
+        k2.metric("Recall", f"{m.get('recall', 0):.1%}")
+        k3.metric("F1 score", f"{m.get('f1', 0):.3f}")
+        k4.metric("False positive rate", f"{m.get('fpr', 0):.2%}")
 
-    mpath = os.path.join(DATA, "metrics.json")
-    if not os.path.exists(mpath):
-        st.info("Metrics not generated yet. Person A will add data/metrics.json.")
-        st.stop()
+        k5, k6, k7 = st.columns(3)
+        k5.metric("Accuracy", f"{m.get('accuracy', 0):.2%}")
+        k6.metric("ROC-AUC", f"{m.get('roc_auc', 0):.3f}")
+        k7.metric("PR-AUC", f"{m.get('pr_auc', 0):.3f}")
 
-    with open(mpath, "r", encoding="utf-8") as f:
-        m = json.load(f)
+        c1, c2 = st.columns([1, 1.5])
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Precision", f"{m.get('precision', 0):.1%}")
-    k2.metric("Recall", f"{m.get('recall', 0):.1%}")
-    k3.metric("F1 score", f"{m.get('f1', 0):.1%}")
-    k4.metric("False positive rate", f"{m.get('fpr', 0):.2%}")
-    if "threshold" in m:
-        st.caption(f"Evaluated at risk threshold: {m['threshold']}")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.subheader("Confusion matrix")
-        cm = m.get("confusion_matrix")
-        if cm is None:
-            st.write("Not available.")
-        else:
+        with c1:
+            st.subheader("Confusion matrix")
+            cm = m.get("confusion_matrix")
             if isinstance(cm, dict):
-                cm = [[cm.get("tn", 0), cm.get("fp", 0)], [cm.get("fn", 0), cm.get("tp", 0)]]
-            fig = px.imshow(
-                cm, text_auto=True, color_continuous_scale="Blues",
-                x=["Predicted legit", "Predicted fraud"], y=["Actual legit", "Actual fraud"],
-            )
-            fig.update_layout(**PLOT, height=380, margin=dict(t=20, b=10), coloraxis_showscale=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-    with c2:
-        st.subheader("Detection rate by scenario")
-        ps = m.get("per_scenario_detection") or m.get("per_scenario") or m.get("scenario_detection")
-        if not ps:
-            st.write("Not available.")
-        else:
-            if isinstance(ps, dict):
-                ps_df = pd.DataFrame({"scenario": list(ps.keys()), "rate": list(ps.values())})
+                z = [[cm.get("tn", 0), cm.get("fp", 0)], [cm.get("fn", 0), cm.get("tp", 0)]]
+            elif isinstance(cm, list):
+                z = cm
             else:
-                ps_df = pd.DataFrame(ps)
-                ps_df.columns = ["scenario", "rate"] + list(ps_df.columns[2:])
-            if ps_df["rate"].max() > 1:
-                ps_df["rate"] = ps_df["rate"] / 100
-            ps_df = ps_df.sort_values("rate")
-            fig2 = px.bar(ps_df, x="rate", y="scenario", orientation="h",
-                          color_discrete_sequence=["#4c8dff"])
-            fig2.update_layout(**PLOT, height=380, xaxis_title="Detection rate", yaxis_title="",
-                               xaxis_tickformat=".0%", xaxis_range=[0, 1], margin=dict(t=20, b=10))
-            st.plotly_chart(fig2, use_container_width=True)
+                z = None
+            if z:
+                fig_cm = px.imshow(z, text_auto=True, color_continuous_scale="Blues",
+                                   x=["Predicted legit", "Predicted fraud"],
+                                   y=["Actual legit", "Actual fraud"])
+                fig_cm.update_layout(**PLOT, height=380, coloraxis_showscale=False, margin=dict(t=20, b=10))
+                st.plotly_chart(fig_cm, width="stretch")
+            else:
+                st.info("Not available.")
 
-    with st.expander("Raw metrics.json"):
-        st.json(m)
+        with c2:
+            st.subheader("Flag rate by scenario")
+            per = m.get("per_scenario", {})
+            if per:
+                ps_df = pd.DataFrame([
+                    {
+                        "scenario": name,
+                        "type": v.get("type", ""),
+                        "count": v.get("count", 0),
+                        "flagged": v.get("flagged", 0),
+                        "rate": float(v.get("flag_rate", 0)) * 100,
+                        "avg_score": v.get("avg_score", 0),
+                    }
+                    for name, v in per.items()
+                ]).sort_values("rate")
+                ps_df["kind"] = np.where(ps_df["type"] == "legit", "Legitimate (want LOW)", "Fraud (want HIGH)")
+                fig_ps = px.bar(
+                    ps_df, x="rate", y="scenario", orientation="h", color="kind",
+                    color_discrete_map={"Legitimate (want LOW)": "#f5a524", "Fraud (want HIGH)": "#ff4b4b"},
+                    hover_data=["count", "flagged", "avg_score"],
+                )
+                fig_ps.update_layout(**PLOT, height=380, xaxis_title="% of transactions flagged",
+                                     yaxis_title="", xaxis_range=[0, 105], legend_title_text="",
+                                     margin=dict(t=20, b=10))
+                st.plotly_chart(fig_ps, width="stretch")
+                st.caption("Fraud scenarios should be flagged (red, high). Legitimate look-alikes should not be (orange, low).")
+            else:
+                st.info("Per-scenario results not available.")
 
-elif page == "About / Privacy":
+
+# =====================================================================
+# ABOUT / PRIVACY
+# =====================================================================
+else:
     st.title("About / Privacy")
     st.markdown(
         """
-**UPI Sentinel** is an explainable fraud analytics prototype built for Quick Heal Cyber Arena 2026 (PS-17).
+**UPI Sentinel** is a fraud analytics prototype built for Quick Heal Cyber Arena 2026 (PS-17).
 
 ### Privacy safeguards
-- **All data is synthetic.** No real people, accounts or transactions are used.
-- **IDs are masked.** User, beneficiary and device IDs are generated tokens (for example U0267, B0605).
-- **No payment network connection.** The system never connects to UPI, banks or any real financial system.
-- **Read-only analytics.** The dashboard only reads scored data. It cannot move money or block payments.
-- **Local case storage.** Analyst decisions are stored in a local SQLite file that is not committed to the repository.
+- **All data is synthetic.** No real customers, accounts or transactions are used.
+- **IDs are masked.** User, beneficiary and device identifiers are generated placeholders.
+- **No payment network connection.** The system never talks to UPI, NPCI or any bank.
+- **Read-only analytics.** It scores and explains transactions; it never moves money or blocks accounts.
+- **Local case storage.** Analyst notes stay in a local SQLite file (`data/cases.db`), which is not committed to git.
 
-### How scoring works
-Each transaction gets a risk score from 0 to 100, built from per-user baselines, rule-based reason codes,
-an anomaly and classification model, and graph analysis of mule beneficiaries. Every flag comes with
-human-readable reasons so an analyst can see why it was raised.
+### How a transaction gets its risk score
+Rules with reason codes, an Isolation Forest + Random Forest model, and graph analysis of mule
+beneficiaries are combined into one 0-100 score, with the reasons shown to the analyst.
 
-### Limitations
-Results are based on simulated fraud patterns and will differ on real traffic. The system supports
-analysts and does not replace them.
+*This is a hackathon prototype and must not be used for decisions about real transactions.*
         """
     )
