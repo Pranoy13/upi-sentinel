@@ -152,7 +152,9 @@ It opens at `http://localhost:8501`. If `data/scored.csv` is missing, the dashbo
 ```powershell
 python -m src.generate_data     # synthetic transactions -> data/transactions.csv
 python -m src.features          # engineered features   -> data/features.csv
-python -m src.evaluate          # metrics               -> data/metrics.json
+python -m src.evaluate          # metrics -> data/metrics.json (needs src/scoring.py)
+python -m src.evaluate --demo   # same, with a placeholder scorer (for testing)
+python -m src.evaluate --threshold 60   # choose the risk threshold (default 60)
 ```
 
 ## 🧭 Dashboard Pages
@@ -165,3 +167,52 @@ python -m src.evaluate          # metrics               -> data/metrics.json
 | Cases | All analyst decisions with CSV export |
 | Evaluation | Precision, recall, F1, false positive rate, confusion matrix, per-scenario detection |
 | About / Privacy | Synthetic data and privacy safeguards |
+
+
+
+---
+
+## 📊 Evaluation
+
+Detection is evaluated on a **time-based hold-out**: the model trains on the first 70% of transactions and is tested on the last 30%, so it never sees the future.
+
+Reported metrics (written to `data/metrics.json` and shown on the dashboard's Evaluation page):
+
+- Precision, recall, F1 and **false positive rate** at the chosen risk threshold
+- Confusion matrix
+- Per-scenario detection rate, including the four legitimate look-alike scenarios
+
+*Results table: to be filled in once the final scoring pipeline is merged.*
+
+## 🔒 Privacy and Safety
+
+- All data is **synthetic**. No real transactions, customers or bank records are used.
+- User, beneficiary and device IDs are **masked, generated identifiers**.
+- The system has **no connection to any real payment network** (UPI, NPCI or banks).
+- The dashboard is **read-only analytics**: it scores and reviews, it never moves money or blocks accounts.
+- Analyst case notes are stored locally in SQLite (`data/cases.db`).
+
+See `docs/privacy_safeguards.md` for details *(planned)*.
+
+## 🖼️ Screenshots
+
+*Screenshots will be added once the dashboard is complete.*
+
+| Overview | High-Risk Queue |
+|----------|-----------------|
+| *(coming soon)* | *(coming soon)* |
+
+| Case View with timeline | Evaluation |
+|-------------------------|------------|
+| *(coming soon)* | *(coming soon)* |
+
+## 📄 Documentation
+
+- [Dataset description](docs/dataset_description.md)
+- [Data schema](data/schema.md)
+- Technical documentation *(planned)*
+- Privacy safeguards *(planned)*
+
+## ⚠️ Disclaimer
+
+UPI Sentinel is a hackathon prototype built on synthetic data. It is not a production fraud system and must not be used to make decisions about real customers or transactions.
