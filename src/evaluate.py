@@ -60,7 +60,7 @@ def metrics_at(y, s, thr):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--demo", action="store_true", help="use placeholder scorer")
-    ap.add_argument("--threshold", type=int, default=60)
+    ap.add_argument("--threshold", type=int, default=35)
     args = ap.parse_args()
 
     df = load_scored(args.demo).sort_values("timestamp").reset_index(drop=True)
