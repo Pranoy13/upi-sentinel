@@ -111,5 +111,5 @@ if __name__ == "__main__":
     print("\nSCORING COMPLETE")
     print("Total transactions:", len(scored))
     print("Average risk score:", round(scored["risk_score"].mean(), 2))
-    print("High-risk transactions:", int((scored["risk_score"] >= 60).sum()))
+    print("High-risk transactions:", int((scored["risk_score"] >= 35).sum()))
     print("Saved output:", output_path)

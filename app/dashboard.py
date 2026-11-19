@@ -101,7 +101,7 @@ page = st.sidebar.radio(
     "Navigate",
     ["Overview", "High-Risk Queue", "Case View", "Cases", "Evaluation", "About / Privacy"],
 )
-threshold = st.sidebar.slider("Risk threshold", 0, 100, 60)
+threshold = st.sidebar.slider("Risk threshold", 0, 100, 35)
 
 if DEMO:
     st.warning("⚠️ Demo scoring: data/scored.csv not found, using a temporary placeholder risk score.")

@@ -148,11 +148,16 @@ def predict_proba(df):
 
     if _model_bundle is None:
         if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(
-                "Model not found. Run train(df) first."
-            )
+            if "is_fraud" in df.columns:
+                print("No saved model found. Training one now (first run only)...")
+                train(df)
+            else:
+                raise FileNotFoundError(
+                    "Model not found. Run train(df) first."
+                )
 
-        _model_bundle = joblib.load(MODEL_PATH)
+        if _model_bundle is None:
+            _model_bundle = joblib.load(MODEL_PATH)
 
     X = _prepare_features(df)
 
